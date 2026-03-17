@@ -6,9 +6,10 @@ dependencies = [
     "pydantic>=2.7",
     "networkx>=3.3",
     "numpy>=1.26",
-    "scipy>=1.13",
     "shapely>=2.0",
     "pygame>=2.6",
+    "matplotlib>=3.10.8",
+    "casadi>=3.7.2",
 ]
 
 [dependency-groups]

@@ -39,16 +39,14 @@ def ego() -> VehicleState:
 def test_emergency_stop_full_brake(ego):
     traj = LocalTrajectory(timestamp=0.0, points=[], is_emergency_stop=True)
     ctrl = compute_mpc(ego, traj)
-    assert ctrl.brake == 1.0
-    assert ctrl.throttle == 0.0
+    assert ctrl.accel_cmd == -1.0
 
 
 def test_control_bounds_respected(ego):
     traj = _make_straight_trajectory()
     ctrl = compute_mpc(ego, traj)
     assert -0.15 <= ctrl.steering_delta <= 0.15
-    assert 0.0 <= ctrl.throttle <= 1.0
-    assert 0.0 <= ctrl.brake <= 1.0
+    assert -1.0 <= ctrl.accel_cmd <= 1.0
 
 
 def test_straight_path_low_steering(ego):

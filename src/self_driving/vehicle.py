@@ -40,19 +40,22 @@ def integrate_bicycle_model(
         -params.max_steering_angle, min(params.max_steering_angle, new_steering)
     )
 
-    # Longitudinal acceleration from throttle/brake
-    accel = (
-        control.throttle * params.max_acceleration
-        - control.brake * params.max_deceleration
-    )
+    # Longitudinal acceleration from unified command
+    if control.accel_cmd >= 0:
+        accel = control.accel_cmd * params.max_acceleration
+    else:
+        accel = control.accel_cmd * params.max_deceleration
 
     # Bicycle model kinematics
     lr = params.wheelbase * params.lr_ratio
-    beta = math.atan(lr / params.wheelbase * math.tan(new_steering))
+    # Note: negate steering angle so positive steering → right turn
+    beta = math.atan(lr / params.wheelbase * math.tan(-new_steering))
+
+    yaw_rate = (state.speed / max(lr, 0.01)) * math.sin(beta)
 
     x = state.pose.x + state.speed * math.cos(state.pose.heading + beta) * dt
     y = state.pose.y + state.speed * math.sin(state.pose.heading + beta) * dt
-    heading = state.pose.heading + (state.speed / max(lr, 0.01)) * math.sin(beta) * dt
+    heading = state.pose.heading + yaw_rate * dt
 
     # Normalise heading to [-pi, pi]
     heading = (heading + math.pi) % (2 * math.pi) - math.pi
@@ -66,5 +69,6 @@ def integrate_bicycle_model(
         speed=new_speed,
         acceleration=accel,
         steering_angle=new_steering,
+        yaw_rate=yaw_rate,
         timestamp=state.timestamp + dt,
     )

@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-render", action="store_true", help="Run headless (no window)"
     )
+    parser.add_argument(
+        "--no-obstacles", action="store_true", help="Disable all obstacle actors"
+    )
+    parser.add_argument(
+        "--controller",
+        choices=["mpc", "pure_pursuit"],
+        default="mpc",
+        help="Controller type (default: mpc)",
+    )
     return parser.parse_args()
 
 
@@ -62,13 +71,30 @@ def main() -> None:
     else:
         initial_heading = 0.0
 
-    # --- Ego vehicle: start at first node, already facing the route ---
-    ego_state = VehicleState(
-        pose=Pose(
-            x=start_node.position.x,
-            y=start_node.position.y,
-            heading=initial_heading,
+    # --- Ego vehicle: start in curbside lane of the first route edge ---
+    # Nodes sit on the road centreline (d=0); lanes lie to the right of it.
+    # Offset ego to the curbside lane centre so KEEP_LANE starts with no drift.
+    first_edge = next(
+        (
+            e
+            for e in road_map.edges
+            if len(initial_route.waypoint_ids) >= 2
+            and e.from_node == initial_route.waypoint_ids[0]
+            and e.to_node == initial_route.waypoint_ids[1]
         ),
+        None,
+    )
+    if first_edge is not None:
+        curbside_d = (first_edge.num_lanes - 1 + 0.5) * first_edge.lane_width
+        rx = math.sin(initial_heading)   # right-perpendicular of heading
+        ry = -math.cos(initial_heading)
+        start_x = start_node.position.x + rx * curbside_d
+        start_y = start_node.position.y + ry * curbside_d
+    else:
+        start_x, start_y = start_node.position.x, start_node.position.y
+
+    ego_state = VehicleState(
+        pose=Pose(x=start_x, y=start_y, heading=initial_heading),
         speed=0.0,
         acceleration=0.0,
         steering_angle=0.0,
@@ -76,9 +102,12 @@ def main() -> None:
     )
 
     # --- Actors ---
-    vehicles = create_vehicle_actors(road_map, graph, count=4, rng=rng)
-    pedestrians = create_pedestrian_actors(road_map, count=3, rng=rng)
-    actors = vehicles + pedestrians
+    if args.no_obstacles:
+        actors = []
+    else:
+        vehicles = create_vehicle_actors(road_map, graph, count=4, rng=rng)
+        pedestrians = create_pedestrian_actors(road_map, count=3, rng=rng)
+        actors = vehicles + pedestrians
 
     # --- World ---
     world = SimulationWorld(
@@ -96,6 +125,7 @@ def main() -> None:
         destination_node=dest_node_id,
         render_every_n=2,
         max_steps=args.steps,
+        controller_type=args.controller,
     )
 
     loop = SimulationLoop(world=world, config=sim_cfg)

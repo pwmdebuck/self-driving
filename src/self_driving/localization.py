@@ -84,7 +84,7 @@ def localize(
     # ------------------------------------------------------------------
     # 3. Snap to nearest road edge
     # ------------------------------------------------------------------
-    nearest_edge = _nearest_road_edge(road_map, noisy_x, noisy_y)
+    nearest_edge = nearest_road_edge(road_map, noisy_x, noisy_y)
 
     return LocalizationOutput(
         timestamp=scan.timestamp,
@@ -153,8 +153,8 @@ def _cluster_points(
     return clusters
 
 
-def _nearest_road_edge(road_map: RoadMap, x: float, y: float) -> RoadEdge | None:
-    """Return the road edge whose midpoint is closest to (x, y)."""
+def nearest_road_edge(road_map: RoadMap, x: float, y: float) -> RoadEdge | None:
+    """Return the road edge whose line is closest to (x, y)."""
     if not road_map.edges:
         return None
     node_by_id = {n.node_id: n.position for n in road_map.nodes}

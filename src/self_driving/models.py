@@ -1,5 +1,6 @@
 """Shared Pydantic data models — the single contract between all layers."""
 
+import enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -47,7 +48,25 @@ class RoadEdge(BaseModel):
     to_node: int
     length: float
     speed_limit: float  # m/s
-    lane_width: float  # metres
+    lane_width: float  # metres per lane
+    num_lanes: int = 1  # number of lanes in this direction
+
+
+class LaneConnection(BaseModel):
+    """A permitted lane-to-lane movement through an intersection node.
+
+    Describes which lane on an incoming edge connects to which lane on
+    an outgoing edge at a given intersection. Lane indices are 0-based
+    with 0 = rightmost (outermost) lane.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    node_id: int
+    from_edge: tuple[int, int]  # (from_node, to_node) of incoming edge
+    from_lane: int
+    to_edge: tuple[int, int]  # (from_node, to_node) of outgoing edge
+    to_lane: int
 
 
 class Building(BaseModel):
@@ -72,6 +91,7 @@ class RoadMap(BaseModel):
     nodes: list[RoadNode]
     edges: list[RoadEdge]
     buildings: list[Building] = []
+    lane_connections: list[LaneConnection] = []
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +158,30 @@ class LocalizationOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Layer 3 — Behavioural Planning
+# ---------------------------------------------------------------------------
+
+
+class BehaviorState(str, enum.Enum):
+    """FSM states for the behavioural planner."""
+
+    KEEP_LANE = "KEEP_LANE"
+    CHANGE_LANE_LEFT = "CHANGE_LANE_LEFT"
+    CHANGE_LANE_RIGHT = "CHANGE_LANE_RIGHT"
+
+
+class BehaviorOutput(BaseModel):
+    """Output of the behavioural planner: selected lane and target speed."""
+
+    model_config = ConfigDict(frozen=True)
+
+    state: BehaviorState
+    target_lane: int  # 0 = innermost, num_lanes-1 = curbside
+    target_speed: float  # m/s
+    lane_change_end_pos: Vector2 | None = None  # world-space anchor for lane change end
+
+
+# ---------------------------------------------------------------------------
 # Layer 3 — Path Planning
 # ---------------------------------------------------------------------------
 
@@ -160,6 +204,7 @@ class LocalTrajectory(BaseModel):
     timestamp: float
     points: list[TrajectoryPoint]
     is_emergency_stop: bool
+    centerline: list[Vector2] = []  # Catmull-Rom reference path (for visualisation)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +221,7 @@ class VehicleState(BaseModel):
     speed: float  # longitudinal speed m/s
     acceleration: float  # m/s²
     steering_angle: float  # front wheel angle in radians
+    yaw_rate: float = 0.0  # rad/s — d(heading)/dt from bicycle model
     timestamp: float
 
 
@@ -185,8 +231,8 @@ class ControlInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     steering_delta: float  # change to steering angle (radians)
-    throttle: float  # 0.0 – 1.0
-    brake: float  # 0.0 – 1.0
+    accel_cmd: float  # longitudinal command: +1 = full throttle, -1 = full brake
+    predicted_poses: list["Pose"] = []  # MPC horizon rollout (for visualisation)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +267,8 @@ class MapConfig(BaseModel):
     grid_cols: int = 6
     block_size_m: float = 60.0  # metres between intersections
     speed_limit: float = 8.33  # m/s (~30 km/h)
-    lane_width: float = 3.5  # metres
+    lane_width: float = 3.5  # metres per lane
+    default_num_lanes: int = 2  # lanes per direction on each road
 
 
 class LidarConfig(BaseModel):
@@ -251,12 +298,23 @@ class MpcParams(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    n_horizon: int = 8
-    dt: float = 0.1  # seconds per horizon step
-    weight_cte: float = 5.0  # cross-track error weight
-    weight_heading: float = 2.0  # heading error weight
-    weight_speed: float = 1.0  # speed error weight
-    weight_effort: float = 0.5  # control effort weight
+    n_horizon: int = 10
+    dt: float = 0.1 # seconds per horizon step
+    weight_cte: float = 10.0  # cross-track error weight
+    weight_heading: float = 50.0  # heading error weight
+    weight_speed: float = 100.0  # speed error weight
+    weight_effort: float = 5.0  # control effort weight
+    weight_rate: float = 5.0  # penalise control rate-of-change (smoothness)
+
+
+class PurePursuitParams(BaseModel):
+    """Pure pursuit controller parameters."""
+
+    model_config = ConfigDict(frozen=True)
+
+    lookahead_m: float = 8.0  # lookahead distance (metres)
+    speed_gain: float = 1.5  # accel proportional gain (accel_cmd per m/s error)
+    max_steering_delta: float = 0.08  # max steering change per step (rad)
 
 
 class SimConfig(BaseModel):
@@ -270,3 +328,4 @@ class SimConfig(BaseModel):
     num_vehicle_actors: int = 4
     num_pedestrian_actors: int = 3
     max_steps: int | None = None
+    controller_type: Literal["mpc", "pure_pursuit"] = "mpc"

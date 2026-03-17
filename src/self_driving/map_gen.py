@@ -1,7 +1,8 @@
 """Procedural road network generation.
 
 Generates a grid-based road map where intersections become nodes and
-horizontal/vertical connections become directed edges.
+horizontal/vertical connections become directed edges. Supports multiple
+lanes per direction with automatic lane connection generation at intersections.
 """
 
 import math
@@ -11,6 +12,7 @@ import networkx as nx
 
 from self_driving.models import (
     Building,
+    LaneConnection,
     MapConfig,
     RoadEdge,
     RoadMap,
@@ -58,6 +60,7 @@ def generate_road_map(config: MapConfig, seed: int = 42) -> tuple[RoadMap, nx.Di
                 length=length,
                 speed_limit=config.speed_limit,
                 lane_width=config.lane_width,
+                num_lanes=config.default_num_lanes,
             )
         )
 
@@ -74,16 +77,108 @@ def generate_road_map(config: MapConfig, seed: int = 42) -> tuple[RoadMap, nx.Di
             add_edge(node_id(row + 1, col), node_id(row, col))
 
     buildings = _generate_buildings(nodes, config, rng)
-    road_map = RoadMap(nodes=nodes, edges=edges, buildings=buildings)
+    lane_connections = _generate_lane_connections(nodes, edges)
+    road_map = RoadMap(
+        nodes=nodes,
+        edges=edges,
+        buildings=buildings,
+        lane_connections=lane_connections,
+    )
     graph = build_graph(road_map)
     return road_map, graph
+
+
+def _generate_lane_connections(
+    nodes: list[RoadNode],
+    edges: list[RoadEdge],
+) -> list[LaneConnection]:
+    """Generate permitted lane-to-lane movements at every intersection.
+
+    For each (incoming, outgoing) edge pair at a node the turn angle
+    determines which lanes connect:
+      - Right turn  (≈ -90°): only curbside lane (N-1) → curbside lane (N-1)
+      - Straight    (≈   0°): lane i → lane i for all shared lanes
+      - Left turn   (≈ +90°): only innermost lane (0) → innermost lane (0)
+      - U-turns are skipped.
+    """
+    node_by_id = {n.node_id: n.position for n in nodes}
+
+    incoming: dict[int, list[RoadEdge]] = {}
+    outgoing: dict[int, list[RoadEdge]] = {}
+    for edge in edges:
+        incoming.setdefault(edge.to_node, []).append(edge)
+        outgoing.setdefault(edge.from_node, []).append(edge)
+
+    connections: list[LaneConnection] = []
+
+    for node in nodes:
+        nid = node.node_id
+        for inc in incoming.get(nid, []):
+            a = node_by_id[inc.from_node]
+            b = node_by_id[inc.to_node]
+            inc_heading = math.atan2(b.y - a.y, b.x - a.x)
+
+            for out in outgoing.get(nid, []):
+                if out.to_node == inc.from_node:
+                    continue  # skip U-turns
+
+                c = node_by_id[out.to_node]
+                out_heading = math.atan2(c.y - b.y, c.x - b.x)
+                turn = _normalise_angle(out_heading - inc_heading)
+
+                from_edge = (inc.from_node, inc.to_node)
+                to_edge = (out.from_node, out.to_node)
+
+                if turn < -math.pi / 4:  # right turn — curbside lane only
+                    connections.append(
+                        LaneConnection(
+                            node_id=nid,
+                            from_edge=from_edge,
+                            from_lane=inc.num_lanes - 1,
+                            to_edge=to_edge,
+                            to_lane=out.num_lanes - 1,
+                        )
+                    )
+                elif turn > math.pi / 4:  # left turn — innermost lane only
+                    connections.append(
+                        LaneConnection(
+                            node_id=nid,
+                            from_edge=from_edge,
+                            from_lane=0,
+                            to_edge=to_edge,
+                            to_lane=0,
+                        )
+                    )
+                else:  # straight — connect lanes by index
+                    for lane in range(min(inc.num_lanes, out.num_lanes)):
+                        connections.append(
+                            LaneConnection(
+                                node_id=nid,
+                                from_edge=from_edge,
+                                from_lane=lane,
+                                to_edge=to_edge,
+                                to_lane=lane,
+                            )
+                        )
+
+    return connections
+
+
+def _normalise_angle(angle: float) -> float:
+    """Normalise angle to the range (-π, π]."""
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle <= -math.pi:
+        angle += 2 * math.pi
+    return angle
 
 
 def _generate_buildings(
     nodes: list[RoadNode], config: MapConfig, rng: random.Random
 ) -> list[Building]:
     """Place buildings in city blocks between intersections."""
-    setback = config.lane_width + 3.0  # road half-width + sidewalk clearance
+    road_half_width = config.lane_width * config.default_num_lanes
+    setback = road_half_width + 3.0  # road half-width + sidewalk clearance
     buildings: list[Building] = []
 
     node_pos = {n.node_id: n.position for n in nodes}
