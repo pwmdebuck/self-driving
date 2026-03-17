@@ -69,7 +69,7 @@ def plan_path(
     ego = loc.estimated_pose
 
     # Resolve behaviour defaults
-    edge = _route_edge_for_ego(route, ego, road_map) or loc.nearest_road_edge
+    edge = _route_edge_for_ego(route, ego, road_map, node_by_id) or loc.nearest_road_edge
     lane_width = edge.lane_width if edge else 3.5
     num_lanes = edge.num_lanes if edge else 1
     speed_limit = edge.speed_limit if edge else 8.33
@@ -419,6 +419,7 @@ def _route_edge_for_ego(
     route: Route,
     ego: Pose,
     road_map: RoadMap,
+    node_by_id: dict[int, Vector2] | None = None,
 ) -> RoadEdge | None:
     """Return the route edge ego is currently traversing.
 
@@ -426,7 +427,8 @@ def _route_edge_for_ego(
     out-of-range penalty when ego is before/after the segment. Edges that
     point anti-parallel to ego's heading are skipped (route is directed).
     """
-    node_by_id = {n.node_id: n.position for n in road_map.nodes}
+    if node_by_id is None:
+        node_by_id = {n.node_id: n.position for n in road_map.nodes}
     edge_by_pair = {(e.from_node, e.to_node): e for e in road_map.edges}
     cos_h = math.cos(ego.heading)
     sin_h = math.sin(ego.heading)
