@@ -161,11 +161,6 @@ def _ego_d(ego: Pose, edge: RoadEdge, node_by_id: dict[int, Vector2]) -> float:
     return (ego.x - a.x) * rx + (ego.y - a.y) * ry
 
 
-def _object_d(obj_pose: Pose, edge: RoadEdge, node_by_id: dict[int, Vector2]) -> float:
-    """Signed perpendicular distance of an object from the road centreline."""
-    return _ego_d(obj_pose, edge, node_by_id)
-
-
 def _object_forward_dist(obj_pose: Pose, ego: Pose, edge: RoadEdge, node_by_id: dict[int, Vector2]) -> float:
     """Signed forward distance from ego to object along the road direction."""
     a = node_by_id.get(edge.from_node)
@@ -196,7 +191,7 @@ def _obstacle_in_lane(
         fwd = _object_forward_dist(obj.pose, ego, edge, node_by_id)
         if fwd <= 0 or fwd > lookahead_m:
             continue
-        obj_d = _object_d(obj.pose, edge, node_by_id)
+        obj_d = _ego_d(obj.pose, edge, node_by_id)
         if abs(obj_d - center_d) < half:
             return True
     return False
@@ -239,8 +234,6 @@ def _compute_target_speed(
     edge: RoadEdge,
 ) -> float:
     """Scale target speed linearly based on nearest ahead obstacle distance."""
-    node_by_id: dict[int, Vector2] = {}  # not needed for forward dist via ego heading
-    # Use ego heading to project forward distance directly
     min_dist = _SLOW_DOWN_DIST
     cos_h = math.cos(ego.heading)
     sin_h = math.sin(ego.heading)
