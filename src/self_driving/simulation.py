@@ -22,6 +22,7 @@ from statistics import mean
 from self_driving.actors import update_actors
 from self_driving.behavioral_planner import plan_behavior
 from self_driving.controller import MpcParams, VehicleParams, compute_mpc
+from self_driving.map_gen import update_traffic_lights
 from self_driving.pure_pursuit import compute_pure_pursuit
 from self_driving.localization import localize, nearest_road_edge, update_actor_detections
 from self_driving.models import (
@@ -102,9 +103,14 @@ class SimulationLoop:
         world = self.world
         t_step = time.perf_counter()
 
-        # 1. Clock + actors
+        # 1. Clock + actors + traffic lights
         t0 = time.perf_counter()
         world = world.advance_clock(dt)
+        if world.road_map.traffic_lights:
+            new_tl_states = update_traffic_lights(
+                world.traffic_light_states, world.road_map.traffic_lights, dt
+            )
+            world = world.with_traffic_light_states(new_tl_states)
         new_actors = update_actors(
             world.actor_states,
             world.road_map,
@@ -152,7 +158,10 @@ class SimulationLoop:
         # 4b. Behavioural planning
         t0 = time.perf_counter()
         if route is not None:
-            behavior = plan_behavior(loc, route, world.road_map, self.last_behavior)
+            behavior = plan_behavior(
+                loc, route, world.road_map, self.last_behavior,
+                world.traffic_light_states,
+            )
             self.last_behavior = behavior
         else:
             behavior = None

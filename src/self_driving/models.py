@@ -50,6 +50,9 @@ class RoadEdge(BaseModel):
     speed_limit: float  # m/s
     lane_width: float  # metres per lane
     num_lanes: int = 1  # number of lanes in this direction
+    # Intermediate world-space points defining road curve; empty = straight line
+    control_points: list["Vector2"] = []
+    edge_type: Literal["urban", "highway", "ramp"] = "urban"
 
 
 class LaneConnection(BaseModel):
@@ -80,6 +83,59 @@ class Building(BaseModel):
     depth: float  # metres along y-axis
 
 
+class TrafficLightPhase(str, enum.Enum):
+    """Phase of a traffic light."""
+
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+    RED = "RED"
+
+
+class TrafficLight(BaseModel):
+    """Static configuration of a traffic light at an intersection node."""
+
+    model_config = ConfigDict(frozen=True)
+
+    light_id: int
+    node_id: int  # intersection this light controls
+    controlled_edges: list[tuple[int, int]]  # incoming (from_node, to_node) edges
+    green_duration: float = 20.0  # seconds
+    yellow_duration: float = 3.0  # seconds
+    red_duration: float = 20.0  # seconds
+    phase_offset: float = 0.0  # seconds into cycle at t=0 (staggers lights)
+
+
+class TrafficLightState(BaseModel):
+    """Runtime phase of a single traffic light — changes every tick."""
+
+    model_config = ConfigDict(frozen=True)
+
+    light_id: int
+    phase: TrafficLightPhase
+    time_in_phase: float  # seconds elapsed in current phase
+    time_remaining: float  # seconds until next phase transition
+
+
+class SignType(str, enum.Enum):
+    """Type of road sign."""
+
+    STOP = "STOP"
+    YIELD = "YIELD"
+    SPEED_LIMIT = "SPEED_LIMIT"
+
+
+class RoadSign(BaseModel):
+    """A static road sign positioned along a directed edge."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sign_id: int
+    sign_type: SignType
+    edge: tuple[int, int]  # (from_node, to_node) of the edge this sign is on
+    distance_along_edge: float  # metres from from_node along the edge polyline
+    speed_limit_value: float | None = None  # only used for SPEED_LIMIT signs
+
+
 class RoadMap(BaseModel):
     """Serialisable road network (nodes + edges).
 
@@ -92,6 +148,8 @@ class RoadMap(BaseModel):
     edges: list[RoadEdge]
     buildings: list[Building] = []
     lane_connections: list[LaneConnection] = []
+    traffic_lights: list[TrafficLight] = []
+    road_signs: list[RoadSign] = []
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +226,8 @@ class BehaviorState(str, enum.Enum):
     KEEP_LANE = "KEEP_LANE"
     CHANGE_LANE_LEFT = "CHANGE_LANE_LEFT"
     CHANGE_LANE_RIGHT = "CHANGE_LANE_RIGHT"
+    STOPPING_FOR_RED = "STOPPING_FOR_RED"
+    STOPPING_FOR_SIGN = "STOPPING_FOR_SIGN"
 
 
 class BehaviorOutput(BaseModel):

@@ -10,6 +10,7 @@ import random
 
 from shapely.geometry import LineString, Point
 
+from self_driving.map_gen import edge_polyline
 from self_driving.models import (
     ActorState,
     DetectedObject,
@@ -162,11 +163,10 @@ def nearest_road_edge(road_map: RoadMap, x: float, y: float) -> RoadEdge | None:
     best_dist = math.inf
     pt = Point(x, y)
     for edge in road_map.edges:
-        a = node_by_id.get(edge.from_node)
-        b = node_by_id.get(edge.to_node)
-        if a is None or b is None:
+        pts = edge_polyline(edge, node_by_id)
+        if len(pts) < 2:
             continue
-        seg = LineString([(a.x, a.y), (b.x, b.y)])
+        seg = LineString([(p.x, p.y) for p in pts])
         d = pt.distance(seg)
         if d < best_dist:
             best_dist = d

@@ -72,12 +72,19 @@ _TIMING_BUDGET_MS = 50.0  # 20 Hz target step budget
 class Visualizer:
     """Pygame-based 2D top-down visualiser for the simulation."""
 
-    def __init__(self, world_size_m: float = 400.0) -> None:
+    def __init__(
+        self,
+        world_size_m: float = 400.0,
+        world_min_x: float = 0.0,
+        world_min_y: float = 0.0,
+    ) -> None:
         """Initialise Pygame window.
 
         Parameters
         ----------
         world_size_m: side length of the square world in metres
+        world_min_x: minimum x world coordinate (left edge)
+        world_min_y: minimum y world coordinate (bottom edge)
         """
         if not _PYGAME_AVAILABLE:
             raise RuntimeError("pygame is not installed. Run: uv add pygame")
@@ -87,8 +94,8 @@ class Visualizer:
         self._clock = pygame.time.Clock()
         self._font = pygame.font.SysFont("monospace", 14)
         self._scale = (_WINDOW_W - 2 * _MARGIN) / world_size_m
-        self._offset_x = _MARGIN
-        self._offset_y = _MARGIN
+        self._offset_x = _MARGIN - world_min_x * self._scale
+        self._offset_y = _MARGIN - world_min_y * self._scale
         # Rolling chart buffer: (speed_kmh, target_speed_kmh|None, steering_deg, steer_delta_deg|None, accel_cmd)
         self._chart_buf: deque[
             tuple[float, float | None, float, float | None, float]
