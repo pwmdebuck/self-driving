@@ -5,7 +5,7 @@ import math
 import random
 
 from self_driving.actors import create_pedestrian_actors, create_vehicle_actors
-from self_driving.map_gen import generate_road_map
+from self_driving.map_gen import generate_demo_map, generate_road_map
 from self_driving.models import (
     MapConfig,
     Pose,
@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=None, help="Max simulation steps")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
+        "--map",
+        choices=["grid", "demo"],
+        default="grid",
+        help="Map type: grid (default) or demo (rich road features)",
+    )
+    parser.add_argument(
         "--no-render", action="store_true", help="Run headless (no window)"
     )
     parser.add_argument(
@@ -50,12 +56,15 @@ def main() -> None:
     rng = random.Random(args.seed)
 
     # --- Map ---
-    map_cfg = MapConfig(
-        grid_rows=args.rows,
-        grid_cols=args.cols,
-        block_size_m=args.block,
-    )
-    road_map, graph = generate_road_map(map_cfg, seed=args.seed)
+    if args.map == "demo":
+        road_map, graph = generate_demo_map()
+    else:
+        map_cfg = MapConfig(
+            grid_rows=args.rows,
+            grid_cols=args.cols,
+            block_size_m=args.block,
+        )
+        road_map, graph = generate_road_map(map_cfg, seed=args.seed)
     node_by_id = {n.node_id: n.position for n in road_map.nodes}
 
     # --- Destination: last node by default ---
@@ -131,8 +140,13 @@ def main() -> None:
     loop = SimulationLoop(world=world, config=sim_cfg)
 
     # --- Visualiser ---
-    world_size = max(args.rows, args.cols) * args.block * 1.1
-    viz = None if args.no_render else Visualizer(world_size_m=world_size)
+    all_x = [n.x for n in node_by_id.values()]
+    all_y = [n.y for n in node_by_id.values()]
+    min_x, min_y = min(all_x), min(all_y)
+    world_size = max(max(all_x) - min_x, max(all_y) - min_y) * 1.2
+    viz = None if args.no_render else Visualizer(
+        world_size_m=world_size, world_min_x=min_x - world_size * 0.05, world_min_y=min_y - world_size * 0.05
+    )
 
     loop.run(visualizer=viz)
 

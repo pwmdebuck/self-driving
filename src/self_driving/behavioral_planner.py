@@ -7,6 +7,7 @@ based on detected objects and the current road geometry.
 
 import math
 
+from self_driving.map_gen import edge_arc_length, edge_polyline
 from self_driving.models import (
     BehaviorOutput,
     BehaviorState,
@@ -16,6 +17,9 @@ from self_driving.models import (
     RoadEdge,
     RoadMap,
     Route,
+    SignType,
+    TrafficLightPhase,
+    TrafficLightState,
     Vector2,
 )
 
@@ -38,6 +42,7 @@ def plan_behavior(
     route: Route,
     road_map: RoadMap,
     prev: BehaviorOutput | None,
+    traffic_light_states: list[TrafficLightState] | None = None,
 ) -> BehaviorOutput:
     """Behavioural FSM: decide which lane to drive in and at what speed.
 
@@ -54,7 +59,29 @@ def plan_behavior(
     num_lanes = edge.num_lanes
     lane_width = edge.lane_width
     curbside = num_lanes - 1
-    speed_limit = edge.speed_limit
+    speed_limit = _effective_speed_limit(ego, edge, node_by_id, road_map)
+
+    target_lane = prev.target_lane if prev is not None else curbside
+    ego_d = _ego_d(ego, edge, node_by_id)
+
+    # --- Traffic lights (highest priority) ----------------------------------
+    tl_states = traffic_light_states or []
+    if _approaching_red(ego, edge, node_by_id, road_map, tl_states):
+        return BehaviorOutput(
+            state=BehaviorState.STOPPING_FOR_RED,
+            target_lane=target_lane,
+            target_speed=0.0,
+        )
+
+    # --- Stop / yield signs --------------------------------------------------
+    stop_sign = _approaching_stop_sign(ego, edge, node_by_id, road_map)
+    if stop_sign is not None:
+        sign_speed = 0.0 if stop_sign == SignType.STOP else speed_limit * 0.5
+        return BehaviorOutput(
+            state=BehaviorState.STOPPING_FOR_SIGN,
+            target_lane=target_lane,
+            target_speed=sign_speed,
+        )
 
     if prev is None:
         return BehaviorOutput(
@@ -64,8 +91,6 @@ def plan_behavior(
         )
 
     state = prev.state
-    target_lane = prev.target_lane
-    ego_d = _ego_d(ego, edge, node_by_id)
 
     # --- Completing a lane change -------------------------------------------
     if state in (BehaviorState.CHANGE_LANE_LEFT, BehaviorState.CHANGE_LANE_RIGHT):
@@ -249,3 +274,109 @@ def _compute_target_speed(
         return 0.5
     t = (min_dist - _EMERGENCY_DIST) / (_SLOW_DOWN_DIST - _EMERGENCY_DIST)
     return max(0.5, min(edge.speed_limit, t * edge.speed_limit))
+
+
+def _ego_progress_along_edge(
+    ego: Pose, edge: RoadEdge, node_by_id: dict[int, Vector2]
+) -> float:
+    """Arc-length distance from the edge's from_node to the closest point to ego."""
+    pts = edge_polyline(edge, node_by_id)
+    cos_h = math.cos(ego.heading)
+    sin_h = math.sin(ego.heading)
+    cumulative = 0.0
+    best_s = 0.0
+    best_dist = math.inf
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        dx, dy = b.x - a.x, b.y - a.y
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-9:
+            continue
+        # Skip sub-segments pointing backward
+        if dx * cos_h + dy * sin_h < 0 and i == 0:
+            cumulative += math.sqrt(seg_len_sq)
+            continue
+        t = ((ego.x - a.x) * dx + (ego.y - a.y) * dy) / seg_len_sq
+        t_c = max(0.0, min(1.0, t))
+        px = a.x + t_c * dx - ego.x
+        py = a.y + t_c * dy - ego.y
+        d = px * px + py * py
+        if d < best_dist:
+            best_dist = d
+            best_s = cumulative + t_c * math.sqrt(seg_len_sq)
+        cumulative += math.sqrt(seg_len_sq)
+    return best_s
+
+
+# Distance ahead of ego to start stopping for a red light
+_RED_STOP_DISTANCE = 18.0
+# Distance ahead of ego to start slowing for a stop sign
+_SIGN_STOP_DISTANCE = 15.0
+
+
+def _approaching_red(
+    ego: Pose,
+    edge: RoadEdge,
+    node_by_id: dict[int, Vector2],
+    road_map: RoadMap,
+    tl_states: list[TrafficLightState],
+) -> bool:
+    """Return True if a red or yellow light governs this edge within stop distance."""
+    if not tl_states:
+        return False
+    state_by_id = {s.light_id: s for s in tl_states}
+    edge_key = (edge.from_node, edge.to_node)
+    edge_len = edge_arc_length(edge_polyline(edge, node_by_id))
+    ego_s = _ego_progress_along_edge(ego, edge, node_by_id)
+    dist_to_end = edge_len - ego_s
+
+    for tl in road_map.traffic_lights:
+        if edge_key not in [tuple(e) for e in tl.controlled_edges]:
+            continue
+        state = state_by_id.get(tl.light_id)
+        if state is None:
+            continue
+        if state.phase in (TrafficLightPhase.RED, TrafficLightPhase.YELLOW):
+            if dist_to_end <= _RED_STOP_DISTANCE:
+                return True
+    return False
+
+
+def _approaching_stop_sign(
+    ego: Pose,
+    edge: RoadEdge,
+    node_by_id: dict[int, Vector2],
+    road_map: RoadMap,
+) -> SignType | None:
+    """Return the sign type if a STOP or YIELD sign is within stopping distance ahead."""
+    edge_key = (edge.from_node, edge.to_node)
+    ego_s = _ego_progress_along_edge(ego, edge, node_by_id)
+    for sign in road_map.road_signs:
+        if tuple(sign.edge) != edge_key:
+            continue
+        if sign.sign_type not in (SignType.STOP, SignType.YIELD):
+            continue
+        dist_to_sign = sign.distance_along_edge - ego_s
+        if 0.0 < dist_to_sign <= _SIGN_STOP_DISTANCE:
+            return sign.sign_type
+    return None
+
+
+def _effective_speed_limit(
+    ego: Pose,
+    edge: RoadEdge,
+    node_by_id: dict[int, Vector2],
+    road_map: RoadMap,
+) -> float:
+    """Return speed limit, reduced by any SPEED_LIMIT signs already passed on this edge."""
+    limit = edge.speed_limit
+    edge_key = (edge.from_node, edge.to_node)
+    ego_s = _ego_progress_along_edge(ego, edge, node_by_id)
+    for sign in road_map.road_signs:
+        if tuple(sign.edge) != edge_key:
+            continue
+        if sign.sign_type != SignType.SPEED_LIMIT:
+            continue
+        if sign.distance_along_edge <= ego_s and sign.speed_limit_value is not None:
+            limit = min(limit, sign.speed_limit_value)
+    return limit

@@ -220,3 +220,136 @@ def test_no_edge_returns_prev(road_map, route):
     )
     out = plan_behavior(loc, route, road_map, prev=prev)
     assert out == prev
+
+
+# ---------------------------------------------------------------------------
+# Traffic light and stop sign tests
+# ---------------------------------------------------------------------------
+
+from self_driving.map_gen import (
+    add_stop_signs,
+    add_traffic_lights,
+    edge_polyline,
+    initial_traffic_light_states,
+)
+from self_driving.models import (
+    RoadEdge,
+    RoadSign,
+    SignType,
+    TrafficLight,
+    TrafficLightPhase,
+    TrafficLightState,
+    Vector2,
+)
+
+
+def _make_red_state(light_id: int, tl: TrafficLight) -> TrafficLightState:
+    return TrafficLightState(
+        light_id=light_id,
+        phase=TrafficLightPhase.RED,
+        time_in_phase=0.0,
+        time_remaining=tl.red_duration,
+    )
+
+
+def _make_green_state(light_id: int, tl: TrafficLight) -> TrafficLightState:
+    return TrafficLightState(
+        light_id=light_id,
+        phase=TrafficLightPhase.GREEN,
+        time_in_phase=0.0,
+        time_remaining=tl.green_duration,
+    )
+
+
+def test_stops_for_red_light(road_map, route):
+    """Ego near end of edge with a RED light → target_speed == 0."""
+    edge = road_map.edges[0]
+    node_by_id = {n.node_id: n.position for n in road_map.nodes}
+    # Place ego close to the to_node (within stop distance)
+    b = node_by_id[edge.to_node]
+    ego = Pose(x=b.x - 5.0, y=b.y, heading=0.0)
+
+    tl = TrafficLight(
+        light_id=0, node_id=edge.to_node,
+        controlled_edges=[(edge.from_node, edge.to_node)],
+        green_duration=20.0, yellow_duration=3.0, red_duration=20.0,
+    )
+    rm_with_lights = road_map.model_copy(update={"traffic_lights": [tl]})
+    red_state = _make_red_state(0, tl)
+
+    loc = _make_loc(rm_with_lights, ego, [])
+    loc = LocalizationOutput(
+        timestamp=0.0, estimated_pose=ego, detected_objects=[],
+        nearest_road_edge=edge,
+    )
+    result = plan_behavior(loc, route, rm_with_lights, None, [red_state])
+    assert result.target_speed == 0.0
+    assert result.state == BehaviorState.STOPPING_FOR_RED
+
+
+def test_proceeds_on_green_light(road_map, route):
+    """Same setup but GREEN light → normal speed."""
+    edge = road_map.edges[0]
+    node_by_id = {n.node_id: n.position for n in road_map.nodes}
+    b = node_by_id[edge.to_node]
+    ego = Pose(x=b.x - 5.0, y=b.y, heading=0.0)
+
+    tl = TrafficLight(
+        light_id=0, node_id=edge.to_node,
+        controlled_edges=[(edge.from_node, edge.to_node)],
+        green_duration=20.0, yellow_duration=3.0, red_duration=20.0,
+    )
+    rm_with_lights = road_map.model_copy(update={"traffic_lights": [tl]})
+    green_state = _make_green_state(0, tl)
+
+    loc = LocalizationOutput(
+        timestamp=0.0, estimated_pose=ego, detected_objects=[],
+        nearest_road_edge=edge,
+    )
+    result = plan_behavior(loc, route, rm_with_lights, None, [green_state])
+    assert result.target_speed > 0.0
+    assert result.state != BehaviorState.STOPPING_FOR_RED
+
+
+def test_stops_for_stop_sign(road_map, route):
+    """Ego approaching a STOP sign within stopping distance → speed == 0."""
+    edge = road_map.edges[0]
+    node_by_id = {n.node_id: n.position for n in road_map.nodes}
+    a = node_by_id[edge.from_node]
+    b = node_by_id[edge.to_node]
+    # Place ego near start of edge; sign is 10 m ahead (within _SIGN_STOP_DISTANCE)
+    ego = Pose(x=a.x + 1.0, y=a.y, heading=0.0)
+    sign = RoadSign(
+        sign_id=0, sign_type=SignType.STOP,
+        edge=(edge.from_node, edge.to_node),
+        distance_along_edge=10.0,
+    )
+    rm_with_sign = road_map.model_copy(update={"road_signs": [sign]})
+    loc = LocalizationOutput(
+        timestamp=0.0, estimated_pose=ego, detected_objects=[],
+        nearest_road_edge=edge,
+    )
+    result = plan_behavior(loc, route, rm_with_sign, None)
+    assert result.target_speed == 0.0
+    assert result.state == BehaviorState.STOPPING_FOR_SIGN
+
+
+def test_no_stop_past_stop_sign(road_map, route):
+    """Ego already past the STOP sign → no stop-for-sign behaviour."""
+    edge = road_map.edges[0]
+    node_by_id = {n.node_id: n.position for n in road_map.nodes}
+    b = node_by_id[edge.to_node]
+    # Ego near end of edge; sign is near start (already passed)
+    ego = Pose(x=b.x - 2.0, y=b.y, heading=0.0)
+    sign = RoadSign(
+        sign_id=0, sign_type=SignType.STOP,
+        edge=(edge.from_node, edge.to_node),
+        distance_along_edge=2.0,  # < ego_s → already passed
+    )
+    rm_with_sign = road_map.model_copy(update={"road_signs": [sign]})
+    loc = LocalizationOutput(
+        timestamp=0.0, estimated_pose=ego, detected_objects=[],
+        nearest_road_edge=edge,
+    )
+    result = plan_behavior(loc, route, rm_with_sign, None)
+    assert result.state != BehaviorState.STOPPING_FOR_SIGN

@@ -13,8 +13,9 @@ Builds a short-horizon local trajectory in the Frenet frame:
 import math
 
 import numpy as np
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 
+from self_driving.map_gen import edge_polyline
 from self_driving.models import (
     BehaviorOutput,
     BehaviorState,
@@ -80,10 +81,11 @@ def plan_path(
             target_speed=speed_limit,
         )
 
-    # Build lane-centred route waypoints
+    # Build lane-centred route waypoints (expand curved edge control points)
+    edge_by_pair = {(e.from_node, e.to_node): e for e in road_map.edges}
     valid_node_ids = [nid for nid in route.waypoint_ids if nid in node_by_id]
     lane_waypoints = _lane_center_waypoints(
-        valid_node_ids, node_by_id, behavior.target_lane, lane_width
+        valid_node_ids, node_by_id, behavior.target_lane, lane_width, edge_by_pair
     )
     if not lane_waypoints:
         return emergency_stop_trajectory(ego, loc.timestamp)
@@ -435,6 +437,7 @@ def _route_edge_for_ego(
 
     best_edge: RoadEdge | None = None
     best_score = math.inf
+    pt = Point(ego.x, ego.y)
 
     for i in range(len(route.waypoint_ids) - 1):
         from_id = route.waypoint_ids[i]
@@ -447,20 +450,22 @@ def _route_edge_for_ego(
         if a is None or b is None:
             continue
         dx, dy = b.x - a.x, b.y - a.y
-        seg_len_sq = dx * dx + dy * dy
-        if seg_len_sq < 1e-9:
-            continue
         # Skip edges anti-parallel to ego heading (route is directed forward)
         if dx * cos_h + dy * sin_h < 0:
             continue
-        t = ((ego.x - a.x) * dx + (ego.y - a.y) * dy) / seg_len_sq
-        t_c = max(0.0, min(1.0, t))
-        proj_x = a.x + t_c * dx
-        proj_y = a.y + t_c * dy
-        perp_sq = (ego.x - proj_x) ** 2 + (ego.y - proj_y) ** 2
-        overshoot = max(0.0, t - 1.0, -t)
-        penalty = (overshoot * math.sqrt(seg_len_sq)) ** 2
-        score = perp_sq + penalty
+        # Use full polyline for distance on curved edges
+        pts = edge_polyline(edge, node_by_id)
+        seg = LineString([(p.x, p.y) for p in pts])
+        perp_dist = pt.distance(seg)
+        # Penalise edges where ego is far past the endpoint
+        seg_len = math.sqrt(dx * dx + dy * dy)
+        if seg_len > 1e-9:
+            t = ((ego.x - a.x) * dx + (ego.y - a.y) * dy) / (seg_len * seg_len)
+            overshoot = max(0.0, t - 1.0, -t)
+            penalty = (overshoot * seg_len) ** 2
+        else:
+            penalty = 0.0
+        score = perp_dist ** 2 + penalty
         if score < best_score:
             best_score = score
             best_edge = edge
@@ -475,15 +480,11 @@ def _project_onto_edge(
 ) -> Vector2:
     """Return the closest point on the nearest road edge's centreline to ego."""
     if edge is not None:
-        a = node_by_id.get(edge.from_node)
-        b = node_by_id.get(edge.to_node)
-        if a is not None and b is not None:
-            dx, dy = b.x - a.x, b.y - a.y
-            seg_len_sq = dx * dx + dy * dy
-            if seg_len_sq > 1e-9:
-                t = ((ego.x - a.x) * dx + (ego.y - a.y) * dy) / seg_len_sq
-                t = max(0.0, min(1.0, t))
-                return Vector2(x=a.x + t * dx, y=a.y + t * dy)
+        pts = edge_polyline(edge, node_by_id)
+        if len(pts) >= 2:
+            seg = LineString([(p.x, p.y) for p in pts])
+            proj = seg.interpolate(seg.project(Point(ego.x, ego.y)))
+            return Vector2(x=proj.x, y=proj.y)
     return Vector2(x=ego.x, y=ego.y)
 
 
@@ -513,13 +514,14 @@ def _lane_center_waypoints(
     node_by_id: dict[int, Vector2],
     target_lane: int,
     lane_width: float,
+    edge_by_pair: dict[tuple[int, int], RoadEdge] | None = None,
 ) -> list[Vector2]:
     """Interleaved edge-midpoints and lane-offset node positions for the route.
 
-    Returns 2 points per edge: a lane-offset midpoint and a lane-offset node
-    endpoint. Denser control points reduce per-step spline discontinuities when
-    a waypoint is consumed. At intersection nodes the heading bisector places
-    the waypoint at the correct lane-corner arc position.
+    Returns 2 points per straight edge (midpoint + bisector endpoint), or one
+    midpoint per sub-segment for curved edges (control_points expanded). Denser
+    control points reduce per-step spline discontinuities when a waypoint is
+    consumed.
     """
     if len(node_ids) < 2:
         return [node_by_id[nid] for nid in node_ids]
@@ -532,12 +534,19 @@ def _lane_center_waypoints(
         a = node_by_id[node_ids[i]]
         b = node_by_id[node_ids[i + 1]]
         h_edge = math.atan2(b.y - a.y, b.x - a.x)
-        rx, ry = math.sin(h_edge), -math.cos(h_edge)
 
-        # Midpoint of this edge at lane centre
-        result.append(Vector2(x=(a.x + b.x) / 2 + rx * d, y=(a.y + b.y) / 2 + ry * d))
+        # Expand through control points if the edge has them
+        edge = edge_by_pair.get((node_ids[i], node_ids[i + 1])) if edge_by_pair else None
+        polyline = edge_polyline(edge, node_by_id) if edge else [a, b]
 
-        # Lane-offset node b: heading bisector of incoming + outgoing edges
+        # Emit a lane-offset midpoint for every sub-segment
+        for j in range(len(polyline) - 1):
+            pa, pb = polyline[j], polyline[j + 1]
+            h_seg = math.atan2(pb.y - pa.y, pb.x - pa.x)
+            rx, ry = math.sin(h_seg), -math.cos(h_seg)
+            result.append(Vector2(x=(pa.x + pb.x) / 2 + rx * d, y=(pa.y + pb.y) / 2 + ry * d))
+
+        # Lane-offset node b: heading bisector of incoming + outgoing edge headings
         if i + 2 < n:
             c = node_by_id[node_ids[i + 2]]
             h_out = math.atan2(c.y - b.y, c.x - b.x)
